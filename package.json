@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "optimist": "^0.6.1",
-    "ws": "^0.4.31"
+    "ws": "^0.4.31",
+    "es6-promise": "^0.1.1"
   }
 }
