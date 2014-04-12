@@ -1,0 +1,22 @@
+{
+  "name": "node-devtools",
+  "version": "0.0.1",
+  "description": "Chrome DevTools adapter server that enables it to connect and debug node/v8 applications.",
+  "keywords": "devtools debug v8",
+  "license": "BSD-3-Clause",
+  "homepage": "https://github.com/repenaxa/node-devtools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/repenaxa/node-devtools.git"
+  },
+  "bin": {
+    "devtools-adapter": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "optimist": "^0.6.1",
+    "ws": "^0.4.31"
+  }
+}
