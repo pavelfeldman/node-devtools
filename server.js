@@ -259,7 +259,7 @@ Relay.prototype.processDevToolsMessage_ = function(data) {
  * @param {Object} params Parameters, if any.
  * @private
  */
-Relay.prototype.sendDevToolsCommand_ = function(method, params) {
+Relay.prototype.fireDevToolsEvent_ = function(method, params) {
   var data = JSON.stringify({
     'method': method,
     'params': params
@@ -333,8 +333,37 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   //----------------------------------------------------------------------------
 
   lookup['Debugger.enable'] = (function(params, resolve, reject) {
-    resolve({ 'result': true });
+    this.debugTarget_.sendCommand('scripts', {
+      'includeSource': false,
+    }).then(function(response) {
+      for (var i = 0; i < response.length; ++i) {
+        this.fireDevToolsEvent_('Debugger.scriptParsed', {
+          'scriptId': String(response[i]['id']),
+          'url': response[i]['name'],
+          'startLine': 0,
+          'startColumn': 0,
+          'endLine': 0,
+          'endColumn': 0
+        });
+      }
+      resolve({ 'result': true });
+    }.bind(this), reject);
   }).bind(this);
+
+
+  lookup['Debugger.getScriptSource'] = (function(params, resolve, reject) {
+    this.debugTarget_.sendCommand('scripts', {
+      'ids': [params['scriptId'] | 0],
+      'includeSource': true,
+    }).then(function(response) {
+      if (response.length) {
+        resolve({ 'scriptSource': response[0]['source'] });
+      } else {
+        resolve({ 'result': true });
+      }
+    }.bind(this), reject);
+  }).bind(this);
+
   lookup['Debugger.setOverlayMessage'] = (function(params, resolve, reject) {
     if (params['message']) {
       console.log('DebugTarget: ' + params['message']);
@@ -385,7 +414,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
       'global': true
     });
     resolve();
-    this.sendDevToolsCommand_('Debugger.paused', {
+    this.fireDevToolsEvent_('Debugger.paused', {
       'callFrames': [],
       'reason': 'debugCommand',
       'data': {}
@@ -579,7 +608,7 @@ Relay.prototype.buildTargetDispatch_ = function() {
   lookup['break'] = (function(body) {
     // TODO(pfeldman): pull out args and switch - 'breakpoints' has a list
     //     of breakpoints that could be used.
-    this.sendDevToolsCommand_('Debugger.paused', {
+    this.fireDevToolsEvent_('Debugger.paused', {
       'callFrames': [],
       'reason': 'debugCommand',
       'data': {}
@@ -589,7 +618,7 @@ Relay.prototype.buildTargetDispatch_ = function() {
   lookup['exception'] = (function(body) {
     // TODO(pfeldman): what is 'data'? exception info? uncaught flag?
     console.log('TODO: incoming target exception event');
-    this.sendDevToolsCommand_('Debugger.paused', {
+    this.fireDevToolsEvent_('Debugger.paused', {
       'callFrames': [],
       'reason': 'exception',
       'data': {}
