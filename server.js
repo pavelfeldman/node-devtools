@@ -251,10 +251,14 @@ Relay.prototype.processDevToolsMessage_ = function(data) {
     if (!dispatchMethod) {
       console.error('Unhandled DevTools message: ' + method);
       // TODO(pfeldman): proper error response?
-      this.devTools_.send(JSON.stringify({
+      var responseData = JSON.stringify({
         'id': reqId,
         'error': 'Unknown?'
-      }));
+      });
+      this.devTools_.send(responseData);
+      if (argv['log-network']) {
+        console.log('[->DT]', responseData);
+      }
       return;
     }
     var params = packet['params'] || {};
@@ -262,16 +266,24 @@ Relay.prototype.processDevToolsMessage_ = function(data) {
       dispatchMethod(params, resolve, reject);
     });
     promise.then((function(response) {
-      this.devTools_.send(JSON.stringify({
+      var responseData = JSON.stringify({
         'id': reqId,
         'result': response
-      }));
+      });
+      this.devTools_.send(responseData);
+      if (argv['log-network']) {
+        console.log('[->DT]', responseData);
+      }
     }).bind(this), (function(err) {
       // TODO(pfeldman): proper error response?
-      this.devTools_.send(JSON.stringify({
+      var responseData = JSON.stringify({
         'id': reqId,
         'error': err.toString()
-      }));
+      });
+      this.devTools_.send(responseData);
+      if (argv['log-network']) {
+        console.log('[->DT]', responseData);
+      }
     }).bind(this));
   } else {
     // TODO(pfeldman): anything that isn't a method?
