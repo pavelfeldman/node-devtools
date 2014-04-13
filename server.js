@@ -448,6 +448,50 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
 
+  /**
+   * Mapping between DevTools and v8 breakpoint handles.
+   * @type {!Object.<string, string>}
+   */
+  // FIXME(pfeldman): clean up on clearing global object.
+  var breakpointIdToV8Id = {};
+
+  lookup['Debugger.setBreakpointByUrl'] = (function(params, resolve, reject) {
+    var breakpointId = params['url'] + ':' + params['lineNumber'] + ':' +
+        (params['columnNumber'] || 0);
+    this.debugTarget_.sendCommand('setbreakpoint', {
+      'type': 'script',
+      'target': params['url'],
+      'line': params['lineNumber'],
+      'column': params['columnNumber'],
+      'condition': params['condition']
+    }).then(function(response) {
+      var v8BreakpointId = response['breakpoint'];
+      breakpointIdToV8Id[breakpointId] = v8BreakpointId;
+      var locations = [];
+      for (var i = 0; i < response['actual_locations'].length; ++i) {
+        var actualLocation = response['actual_locations'][i];
+        locations.push({ 'lineNumber': actualLocation['line'],
+                         'columnNumber': actualLocation['column'],
+                         'scriptId': actualLocation['script_id'] });
+      }
+      resolve({ 'breakpointId' : breakpointId, 'locations': locations });
+    }, reject);
+  }).bind(this);
+
+  lookup['Debugger.removeBreakpoint'] = (function(params, resolve, reject) {
+    var breakpointId = params['breakpointId'];
+    var v8BreakpointId = breakpointIdToV8Id[breakpointId];
+    if (!v8BreakpointId) {
+      reject('Unknown breakpoint id.');
+      return;
+    }
+    this.debugTarget_.sendCommand('clearbreakpoint', {
+      'breakpoint': v8BreakpointId
+    }).then(function(response) {
+      resolve();
+    }, reject);
+  }).bind(this);
+
   //----------------------------------------------------------------------------
   // DOMStorage.*
   //----------------------------------------------------------------------------
