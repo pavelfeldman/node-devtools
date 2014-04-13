@@ -147,7 +147,7 @@ DebugTarget.prototype.processTargetMessage_ = function(data) {
             // Content present.
             this.dispatchTargetMessage_(
                 headers, this.targetBuffer_.substr(offset, contentLength));
-            this.targetBuffer_ = this.targetBuffer_.substring(offset);
+            this.targetBuffer_ = this.targetBuffer_.substring(offset + contentLength);
             return true;
           }
         }
