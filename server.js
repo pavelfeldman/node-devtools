@@ -485,16 +485,23 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
    * Calls method on the injected script.
    * @param {string} method Method name on the InjectedScript.
    * @param {!Array} args Array of arguments for the call.
-   * @return Promise satisfied when a response is received.
+   * @param {function(!Object)} resolve.
+   * @param {!Function} reject.
    */
-  function dispatchOnInjectedScript(method, args) {
+  function dispatchOnInjectedScript(method, args, resolve, reject) {
     var argsstr = JSON.stringify(args);
-    var expression =
-        'JSON.stringify(__is["' + method + '"].apply(__is, ' + argsstr + '))';
-    return this.debugTarget_.sendCommand('evaluate', {
-      'expression': expression,
+    var expression = '__is["' + method + '"].apply(__is, ' + argsstr + ')';
+    // V8 will trim string values in protocol messages. All but the property
+    // names! Abuse it.
+    var wrapped = 'var result = {};' +
+        'result[JSON.stringify(' + expression + ')] = 1;' +
+        'result;';
+    this.debugTarget_.sendCommand('evaluate', {
+      'expression': wrapped,
       'global': true
-    });
+    }).then(function(response) {
+      resolve(JSON.parse(response['properties'][0]['name']))
+    }, reject);
   }
 
   lookup['Runtime.evaluate'] = (function(params, resolve, reject) {
@@ -504,10 +511,9 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
           params['objectGroup'],
           params['injectCommandLineAPI'],
           params['returnByValue'],
-          params['generatePreview'] ])
-    .then(function(response) {
-      resolve(JSON.parse(response['text']))
-    }, reject);
+          params['generatePreview'] ],
+        resolve,  // We are lucky to return what is given (for now).
+        reject);
   }).bind(this);
 
   lookup['Runtime.callFunctionOn'] = (function(params, resolve, reject) {
@@ -518,37 +524,29 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
           params['arguments'],
           params['doNotPauseOnExceptionsAndMuteConsole'],
           params['returnByValue'],
-          params['generatePreview'] ])
-    .then(function(response) {
-      resolve(JSON.parse(response['text']))
-    }, reject);
+          params['generatePreview'] ],
+        resolve,  // We are lucky to return what is given (for now).
+        reject);
   }).bind(this);
 
   lookup['Runtime.getProperties'] = (function(params, resolve, reject) {
     dispatchOnInjectedScript.call(this,
-        'evaluate',
+        'getProperties',
         [ params['objectId'],
           params['ownProperties'],
-          params['accessorPropertiesOnly'] ])
-    .then(function(response) {
-      resolve(JSON.parse(response['text']))
-    }, reject);
+          params['accessorPropertiesOnly'] ],
+        function(result) { resolve({result : result}); },
+        reject);
   }).bind(this);
 
   lookup['Runtime.releaseObject'] = (function(params, resolve, reject) {
     dispatchOnInjectedScript.call(this,
-        'releaseObject', [])
-    .then(function(response) {
-      resolve(JSON.parse(response['text']))
-    }, reject);
+        'releaseObject', [], resolve, reject);
   }).bind(this);
 
   lookup['Runtime.releaseObjectGroup'] = (function(params, resolve, reject) {
     dispatchOnInjectedScript.call(this,
-        'releaseObjectGroup', [])
-    .then(function(response) {
-      resolve(JSON.parse(response['text']))
-    }, reject);
+        'releaseObjectGroup', [], resolve, reject);
   }).bind(this);
 
   //----------------------------------------------------------------------------
