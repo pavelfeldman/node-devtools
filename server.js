@@ -588,7 +588,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   }).bind(this);
   lookup['Debugger.stepOver'] = (function(params, resolve, reject) {
     this.sendTargetCommand_('continue', {
-      'stepaction': 'over',
+      'stepaction': 'next',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
