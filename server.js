@@ -1,15 +1,6 @@
 #!/usr/bin/env node
 
-// Usage:
-// - launch adapter:
-//   $ node server.js
-// - run node in debug mode:
-//   $ node --debug -e "setInterval(function(){console.log('ping');},1000)"
-// - open dev tools:
-//   chrome-devtools://devtools/bundled/devtools.html?ws=localhost:9800/localhost:5858
-// - helpful debugging:
-//   eval:
-//     InspectorBackendClass.Options.dumpInspectorProtocolMessages = true
+// InspectorBackendClass.Options.dumpInspectorProtocolMessages = true
 
 var net = require('net');
 var optimist = require('optimist');
@@ -20,11 +11,29 @@ var ws = require('ws');
 var Promise = require('es6-promise').Promise;
 
 var argv = optimist
-    .usage('Usage: $0 --port [num]')
+    .usage([
+      'Usage: $0 --port [num]',
+      '',
+      'Acts as a relay between the Chrome DevTools and V8 debug agents (like',
+      'node.js --debug). Supports multiple sessions at the same time; you only',
+      'need one running.',
+      '',
+      'Example:',
+      '  $ $0 --port=9800 &',
+      '  $ node --debug=5858 -e "setInterval(function(){console.log(\'ping\');},1000)"',
+      'Then open, open Chrome and visit:',
+      '  chrome-devtools://devtools/bundled/devtools.html?ws=localhost:9800/localhost:5858',
+      ''
+    ].join('\n'))
     .options('p', {
       describe: 'Port the adapter will listen on for DevTools connections.',
       alias: 'port',
       default: 9800
+    })
+    .options('l', {
+      describe: 'Log network traffic between the DevTools and the target.',
+      alias: 'log-network',
+      default: false
     })
     .argv;
 if (argv.help) {
@@ -32,8 +41,11 @@ if (argv.help) {
   return;
 }
 
-console.log('node-devtools adapter starting...');
-console.log('  Listening for DevTools on localhost:' + argv['port']);
+console.log('node-devtools adapter listening on localhost:' + argv['port']);
+console.log('Open the Chrome DevTools and connect to your debug target:');
+console.log('');
+console.log('  chrome-devtools://devtools/bundled/devtools.html?ws=localhost:' + argv['port'] + '/localhost:<port>');
+console.log('');
 
 // Setup socket server to listen for DevTools connections.
 var devToolsServer = new ws.Server({
@@ -51,15 +63,21 @@ devToolsServer.on('connection', function(devToolsSocket) {
 
   // We open the target before we start handling messages, so that we can ensure
   // both can talk to each other right away.
-  console.log('DevToolsConnection opening target ' + endpoint + '...');
+  console.log('DevTools requesting relay to target at ' + endpoint + '...');
   var targetSocket = net.connect({
     host: host,
     port: port
   });
   targetSocket.on('connect', function() {
-    var connection = new DevToolsConnection(
+    console.log('Connected!');
+
+    // Create and stash connection.
+    var connection = new Relay(
         devToolsSocket, targetSocket, endpoint);
-    openDevToolsConnections.push(connection);
+    openRelays.push(connection);
+
+    // Resume the socket so that messages come through.
+    devToolsSocket.resume();
   });
   targetSocket.on('error', function(e) {
     console.error('Unable to connect to target at ' + endpoint, e);
@@ -68,21 +86,38 @@ devToolsServer.on('connection', function(devToolsSocket) {
 });
 
 /**
- * All open connections to DevTools instances.
- * @type {!Array.<!DevToolsConnection>}
+ * All open relays.
+ * @type {!Array.<!Relay>}
  */
-var openDevToolsConnections = [];
+var openRelays = [];
 
 /**
- * A connection to a DevTools instance.
+ * A relay between a DevTools session and a target debug agent.
  * @param {!ws.WebSocket} devToolsSocket DevTools web socket.
- * @param {!ws.WebSocket} targetSocket Target web socket.
- * @param {string} endpoint Target endpoint like 'localhost:5222'.
+ * @param {!net.Socket} targetSocket Target TCP socket.
+ * @param {string} endpoint Target endpoint like 'localhost:5858'.
  * @constructor
  */
-var DevToolsConnection = function(devToolsSocket, targetSocket, endpoint) {
+var Relay = function(devToolsSocket, targetSocket, endpoint) {
+  /**
+   * WebSocket connection to the DevTools instance.
+   * @type {!ws.WebSocket}
+   * @private
+   */
   this.devTools_ = devToolsSocket;
+
+  /**
+   * TCP socket connection to the target debugger instance.
+   * @type {!net.Socket}
+   * @private
+   */
   this.target_ = targetSocket;
+
+  /**
+   * Target endpoint address (like 'localhost:5858').
+   * @type {string}
+   * @private
+   */
   this.endpoint_ = endpoint;
 
   /**
@@ -157,9 +192,6 @@ var DevToolsConnection = function(devToolsSocket, targetSocket, endpoint) {
   this.target_.on('close', (function() {
     this.close();
   }).bind(this));
-
-  // Resume the devtools socket so that we get messages.
-  this.devTools_.resume();
 };
 
 /**
@@ -167,8 +199,10 @@ var DevToolsConnection = function(devToolsSocket, targetSocket, endpoint) {
  * @param {string} data Incoming data.
  * @private
  */
-DevToolsConnection.prototype.processDevToolsMessage_ = function(data) {
-  console.log('[DT]', data);
+Relay.prototype.processDevToolsMessage_ = function(data) {
+  if (argv['log-network']) {
+    console.log('[DT->]', data);
+  }
 
   var packet = JSON.parse(data);
   var method = packet['method'];
@@ -212,11 +246,16 @@ DevToolsConnection.prototype.processDevToolsMessage_ = function(data) {
  * @param {Object} params Parameters, if any.
  * @private
  */
-DevToolsConnection.prototype.sendDevToolsCommand_ = function(method, params) {
-  this.devTools_.send(JSON.stringify({
+Relay.prototype.sendDevToolsCommand_ = function(method, params) {
+  var data = JSON.stringify({
     'method': method,
     'params': params
-  }));
+  });
+  this.devTools_.send(data);
+
+  if (argv['log-network']) {
+    console.log('[->DT]', data);
+  }
 };
 
 /**
@@ -224,7 +263,7 @@ DevToolsConnection.prototype.sendDevToolsCommand_ = function(method, params) {
  * @param {string} data Incoming data.
  * @private
  */
-DevToolsConnection.prototype.processTargetMessage_ = function(data) {
+Relay.prototype.processTargetMessage_ = function(data) {
   this.targetBuffer_ += data;
 
   // Run a pass over the buffer. If we can parse a complete message, dispatch
@@ -280,14 +319,16 @@ DevToolsConnection.prototype.processTargetMessage_ = function(data) {
  * @param {string?} content Content string, if any.
  * @private
  */
-DevToolsConnection.prototype.dispatchTargetMessage_ = function(
+Relay.prototype.dispatchTargetMessage_ = function(
     headers, content) {
   if (!content) {
     // ?
     return;
   }
 
-  console.log('[V8]', content);
+  if (argv['log-network']) {
+    console.log('[V8->]', content);
+  }
 
   var packet = JSON.parse(content);
   switch (packet['type']) {
@@ -320,7 +361,7 @@ DevToolsConnection.prototype.dispatchTargetMessage_ = function(
  * @return Promise satisfied when a response is received.
  * @private
  */
-DevToolsConnection.prototype.sendTargetCommand_ = function(command, args) {
+Relay.prototype.sendTargetCommand_ = function(command, args) {
   // Construct packet object.
   var packet = {
     'seq': ++this.nextTargetSeqId_,
@@ -346,13 +387,17 @@ DevToolsConnection.prototype.sendTargetCommand_ = function(command, args) {
       'Content-Length: ' + packetLength + '\r\n\r\n' +
       packetString);
 
+  if (argv['log-network']) {
+    console.log('[->V8]', packetString);
+  }
+
   return promise;
 };
 
 /**
  * Closes the connection to the DevTools and target.
  */
-DevToolsConnection.prototype.close = function() {
+Relay.prototype.close = function() {
   if (this.closed_) {
     return;
   }
@@ -366,9 +411,9 @@ DevToolsConnection.prototype.close = function() {
   this.devTools_.close();
 
   // Remove from open connection list.
-  openDevToolsConnections.splice(openDevToolsConnections.indexOf(this), 1);
+  openRelays.splice(openRelays.indexOf(this), 1);
 
-  console.log('DevToolsConnection closing');
+  console.log('Relay closing');
 };
 
 /**
@@ -376,7 +421,7 @@ DevToolsConnection.prototype.close = function() {
  * @return {!Object.<function(Object, Function, Function)>} Lookup table.
  * @private
  */
-DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
+Relay.prototype.buildDevToolsDispatch_ = function() {
   var lookup = {};
 
   //----------------------------------------------------------------------------
@@ -591,7 +636,7 @@ DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
  * @return {!Object.<function(Object)>} Lookup table.
  * @private
  */
-DevToolsConnection.prototype.buildTargetDispatch_ = function() {
+Relay.prototype.buildTargetDispatch_ = function() {
   var lookup = {};
 
   lookup['break'] = (function(body) {
