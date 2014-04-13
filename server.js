@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
-// chrome-devtools://devtools/bundled/devtools.html?ws=localhost:9800/localhost:5858
+// Usage:
+// - launch adapter:
+//   $ node server.js
+// - run node in debug mode:
+//   $ node --debug -e "setInterval(function(){console.log('ping');},1000)"
+// - open dev tools:
+//   chrome-devtools://devtools/bundled/devtools.html?ws=localhost:9800/localhost:5858
 
 var net = require('net');
 var optimist = require('optimist');
@@ -511,7 +517,7 @@ DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
 DevToolsConnection.prototype.buildTargetDispatch_ = function() {
   var lookup = {};
 
-  // TODO(benvanik): send messages to the DevTools:
+  // TODO(benvanik): send messages to the DevTools: (?)
   //     this.devTools_.send(JSON.stringify({contents}));
 
   lookup['break'] = (function(body) {
