@@ -339,10 +339,10 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
       for (var i = 0; i < response.length; ++i) {
         this.fireDevToolsEvent_('Debugger.scriptParsed', {
           'scriptId': String(response[i]['id']),
-          'url': response[i]['name'],
+          'url': response[i]['name'] || "",
           'startLine': 0,
           'startColumn': 0,
-          'endLine': 0,
+          'endLine': response[i]['lineCount'],
           'endColumn': 0
         });
       }
@@ -421,21 +421,27 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
     });
   }).bind(this);
   lookup['Debugger.resume'] = (function(params, resolve, reject) {
-    this.debugTarget_.sendCommand('continue').then(function(response) { resolve(); }, reject);
+    this.fireDevToolsEvent_('Debugger.resumed', {});
+    this.debugTarget_.sendCommand('continue').then(function(response) {
+      resolve();
+    }, reject);
   }).bind(this);
   lookup['Debugger.stepInto'] = (function(params, resolve, reject) {
+    this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue', {
       'stepaction': 'in',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
   lookup['Debugger.stepOut'] = (function(params, resolve, reject) {
+    this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue', {
       'stepaction': 'out',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
   lookup['Debugger.stepOver'] = (function(params, resolve, reject) {
+    this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue', {
       'stepaction': 'next',
       'stepcount': 1
@@ -606,6 +612,32 @@ Relay.prototype.buildTargetDispatch_ = function() {
   var lookup = {};
 
   lookup['break'] = (function(body) {
+    this.debugTarget_.sendCommand('backtrace', {
+      inlineRefs: true,
+    }).then(function(response) {
+      var v8frames = response['frames'];
+      var frames = [];
+
+      for (var i = 0; i < v8frames.length; ++i) {
+        var location = {};
+        location['scriptId'] = String(v8frames[i]['func']['scriptId']);
+        location['lineNumber'] = v8frames[i]['line'];
+        location['columnNumber'] = v8frames[i]['column'];
+
+        var frame = {};
+        frame['callFrameId'] = String(i);
+        frame['functionName'] = '';
+        frame['location'] = location;
+        frame['scopeChain'] = [];
+        frames.push(frame);
+      }
+      this.fireDevToolsEvent_('Debugger.paused', {
+        'callFrames': frames,
+        'reason': 'debugCommand',  // FIXME(pfeldman): provide reason
+        'data': {}
+      });
+    }.bind(this));
+
     // TODO(pfeldman): pull out args and switch - 'breakpoints' has a list
     //     of breakpoints that could be used.
     this.fireDevToolsEvent_('Debugger.paused', {
@@ -622,6 +654,18 @@ Relay.prototype.buildTargetDispatch_ = function() {
       'callFrames': [],
       'reason': 'exception',
       'data': {}
+    });
+  }).bind(this);
+
+  lookup['afterCompile'] = (function(body) {
+    var script = body['script'];
+    this.fireDevToolsEvent_('Debugger.scriptParsed', {
+      'scriptId': String(script['id']),
+      'url': script['name'] || "",
+      'startLine': 0,
+      'startColumn': 0,
+      'endLine': script['lineCount'],
+      'endColumn': 0
     });
   }).bind(this);
 
