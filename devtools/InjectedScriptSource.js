@@ -40,7 +40,7 @@ if (!InjectedScriptHost) {
         type: function(object) { return typeof object; },
         internalConstructorName: function(object) { return "Object" }, 
         inspect: function() { },
-        evaluate: function(expression) { return eval(expression); },
+        evaluate: function(expression) { return (function() { return eval(expression); }).call(null) },
         getInternalProperties: function() { return []; },
         functionDetails: function() { },
         suppressWarningsAndCall: function(target, method, param1, param2)
