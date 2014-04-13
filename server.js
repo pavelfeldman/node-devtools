@@ -7,6 +7,9 @@
 //   $ node --debug -e "setInterval(function(){console.log('ping');},1000)"
 // - open dev tools:
 //   chrome-devtools://devtools/bundled/devtools.html?ws=localhost:9800/localhost:5858
+// - helpful debugging:
+//   eval:
+//     InspectorBackendClass.Options.dumpInspectorProtocolMessages = true
 
 var net = require('net');
 var optimist = require('optimist');
@@ -181,7 +184,7 @@ DevToolsConnection.prototype.processDevToolsMessage_ = function(data) {
       }));
       return;
     }
-    var params = packet['params'];
+    var params = packet['params'] || {};
     var promise = new Promise(function(resolve, reject) {
       dispatchMethod(params, resolve, reject);
     });
@@ -201,6 +204,19 @@ DevToolsConnection.prototype.processDevToolsMessage_ = function(data) {
     // TODO(pfeldman): anything that isn't a method?
     console.error('Unknown DevTools message: ' + packet);
   }
+};
+
+/**
+ * Sends a command to the DevTools.
+ * @param {string} method Method, such as 'Debugger.paused'.
+ * @param {Object} params Parameters, if any.
+ * @private
+ */
+DevToolsConnection.prototype.sendDevToolsCommand_ = function(method, params) {
+  this.devTools_.send(JSON.stringify({
+    'method': method,
+    'params': params
+  }));
 };
 
 /**
@@ -289,7 +305,7 @@ DevToolsConnection.prototype.dispatchTargetMessage_ = function(
         console.error('Unknown target event: ' + packet['event']);
         return;
       }
-      dispatchMethod(packet['body']);
+      dispatchMethod(packet['body'] || {});
       break;
     default:
       console.error('Unknown target packet type: ' + packet['type']);
@@ -363,20 +379,12 @@ DevToolsConnection.prototype.close = function() {
 DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
   var lookup = {};
 
-  // TODO(benvanik): send messages to target:
-  // this.sendTargetCommand_('command', {args}).then(function(response) {
-  //   resolve({...});
-  // }, reject);
-
   //----------------------------------------------------------------------------
   // Console.*
   //----------------------------------------------------------------------------
 
   lookup['Console.enable'] = (function(params, resolve, reject) {
-    resolve({});
-  }).bind(this);
-  lookup['Console.disable'] = (function(params, resolve, reject) {
-    resolve({});
+    resolve({ 'result': true });
   }).bind(this);
   lookup['Console.clearMessages'] = (function(params, resolve, reject) {
     resolve({});
@@ -403,15 +411,84 @@ DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
   //----------------------------------------------------------------------------
 
   lookup['Debugger.enable'] = (function(params, resolve, reject) {
-    resolve({ 'result': false });
+    resolve({ 'result': true });
+  }).bind(this);
+  lookup['Debugger.setOverlayMessage'] = (function(params, resolve, reject) {
+    if (params['message']) {
+      console.log('Debugger: ' + params['message']);
+    }
+    resolve();
   }).bind(this);
 
   lookup['Debugger.setAsyncCallStackDepth'] = (function(params, resolve, reject) {
     resolve({ 'result': false });
   }).bind(this);
-
   lookup['Debugger.setPauseOnExceptions'] = (function(params, resolve, reject) {
     resolve({ 'result': false });
+    var type;
+    var enabled;
+    switch (params['state']) {
+      case 'all':
+        type = 'all';
+        enabled = true;
+        break;
+      case 'none':
+        type = 'all';
+        enabled = false;
+        break;
+      case 'uncaught':
+        type = 'uncaught';
+        enabled = true;
+        break;
+      default:
+        reject(Error('Unknown setPauseOnExceptions state: ' + params['state']));
+        return;
+    }
+    this.sendTargetCommand_('setexceptionbreak', {
+      'type': type,
+      'enabled': enabled
+    }).then(function(response) { resolve(); }, reject);
+  }).bind(this);
+  lookup['Debugger.setSkipAllPauses'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Debugger.pause'] = (function(params, resolve, reject) {
+    // NOTE: this eval will not respond immediately!
+    // We'll need to resolve() right away and poke the DevTools to let them know
+    // the (probably) succeeded.
+    // TODO(pfeldman): I'm sure there's some InjectedScript thing for this.
+    this.sendTargetCommand_('evaluate', {
+      'expression': 'debugger',
+      'global': true
+    });
+    resolve();
+    this.sendDevToolsCommand_('Debugger.paused', {
+      'callFrames': [],
+      'reason': 'debugCommand',
+      'data': {}
+    });
+  }).bind(this);
+  lookup['Debugger.resume'] = (function(params, resolve, reject) {
+    this.sendTargetCommand_('continue').then(function(response) { resolve(); }, reject);
+  }).bind(this);
+  lookup['Debugger.stepInto'] = (function(params, resolve, reject) {
+    this.sendTargetCommand_('continue', {
+      'stepaction': 'in',
+      'stepcount': 1
+    }).then(function(response) { resolve(); }, reject);
+  }).bind(this);
+  lookup['Debugger.stepOut'] = (function(params, resolve, reject) {
+    this.sendTargetCommand_('continue', {
+      'stepaction': 'out',
+      'stepcount': 1
+    }).then(function(response) { resolve(); }, reject);
+  }).bind(this);
+  lookup['Debugger.stepOver'] = (function(params, resolve, reject) {
+    this.sendTargetCommand_('continue', {
+      'stepaction': 'over',
+      'stepcount': 1
+    }).then(function(response) { resolve(); }, reject);
   }).bind(this);
 
   //----------------------------------------------------------------------------
@@ -517,17 +594,24 @@ DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
 DevToolsConnection.prototype.buildTargetDispatch_ = function() {
   var lookup = {};
 
-  // TODO(benvanik): send messages to the DevTools: (?)
-  //     this.devTools_.send(JSON.stringify({contents}));
-
   lookup['break'] = (function(body) {
-    // TODO(benvanik): plumb up
-    console.log('TODO: incoming target break event');
+    // TODO(pfeldman): pull out args and switch - 'breakpoints' has a list
+    //     of breakpoints that could be used.
+    this.sendDevToolsCommand_('Debugger.paused', {
+      'callFrames': [],
+      'reason': 'debugCommand',
+      'data': {}
+    });
   }).bind(this);
 
   lookup['exception'] = (function(body) {
-    // TODO(benvanik): plumb up
+    // TODO(pfeldman): what is 'data'? exception info? uncaught flag?
     console.log('TODO: incoming target exception event');
+    this.sendDevToolsCommand_('Debugger.paused', {
+      'callFrames': [],
+      'reason': 'exception',
+      'data': {}
+    });
   }).bind(this);
 
   return lookup;
