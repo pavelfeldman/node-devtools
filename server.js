@@ -10,6 +10,7 @@ var readline = require('readline');
 var url = require('url');
 var util = require('util');
 var ws = require('ws');
+var injectedScript = require('./devtools/InjectedScriptSource.js');
 
 var EventEmitter = require('events').EventEmitter;
 var Promise = require('es6-promise').Promise;
@@ -84,6 +85,13 @@ devToolsServer.on('connection', function(devToolsSocket) {
       console.log('  Host: ' + targetInfo.host);
       console.log('    V8: ' + targetInfo.v8);
       console.log('');
+
+      // Inject devtools injected script into backend.
+      debugTarget.sendCommand('evaluate', {
+        'expression': '__is = (' +
+            injectedScript.source() + ')(null, this, 1)',
+        'global': true
+      });
 
       // Resume the socket so that messages come through.
       devToolsSocket.resume();
@@ -473,12 +481,74 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   // Runtime.*
   //----------------------------------------------------------------------------
 
+  /**
+   * Calls method on the injected script.
+   * @param {string} method Method name on the InjectedScript.
+   * @param {!Array} args Array of arguments for the call.
+   * @return Promise satisfied when a response is received.
+   */
+  function dispatchOnInjectedScript(method, args) {
+    var argsstr = JSON.stringify(args);
+    var expression =
+        'JSON.stringify(__is["' + method + '"].apply(__is, ' + argsstr + '))';
+    return this.debugTarget_.sendCommand('evaluate', {
+      'expression': expression,
+      'global': true
+    });
+  }
+
   lookup['Runtime.evaluate'] = (function(params, resolve, reject) {
-    resolve({ 'result': false });
+    dispatchOnInjectedScript.call(this,
+        'evaluate',
+        [ params['expression'],
+          params['objectGroup'],
+          params['injectCommandLineAPI'],
+          params['returnByValue'],
+          params['generatePreview'] ])
+    .then(function(response) {
+      resolve(JSON.parse(response['text']))
+    }, reject);
+  }).bind(this);
+
+  lookup['Runtime.callFunctionOn'] = (function(params, resolve, reject) {
+    dispatchOnInjectedScript.call(this,
+        'callFunctionOn',
+        [ params['objectId'],
+          params['functionDeclaration'],
+          params['arguments'],
+          params['doNotPauseOnExceptionsAndMuteConsole'],
+          params['returnByValue'],
+          params['generatePreview'] ])
+    .then(function(response) {
+      resolve(JSON.parse(response['text']))
+    }, reject);
+  }).bind(this);
+
+  lookup['Runtime.getProperties'] = (function(params, resolve, reject) {
+    dispatchOnInjectedScript.call(this,
+        'evaluate',
+        [ params['objectId'],
+          params['ownProperties'],
+          params['accessorPropertiesOnly'] ])
+    .then(function(response) {
+      resolve(JSON.parse(response['text']))
+    }, reject);
+  }).bind(this);
+
+  lookup['Runtime.releaseObject'] = (function(params, resolve, reject) {
+    dispatchOnInjectedScript.call(this,
+        'releaseObject', [])
+    .then(function(response) {
+      resolve(JSON.parse(response['text']))
+    }, reject);
   }).bind(this);
 
   lookup['Runtime.releaseObjectGroup'] = (function(params, resolve, reject) {
-    resolve({ 'result': false });
+    dispatchOnInjectedScript.call(this,
+        'releaseObjectGroup', [])
+    .then(function(response) {
+      resolve(JSON.parse(response['text']))
+    }, reject);
   }).bind(this);
 
   //----------------------------------------------------------------------------
