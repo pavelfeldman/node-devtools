@@ -6,8 +6,10 @@ var net = require('net');
 var optimist = require('optimist');
 var readline = require('readline');
 var url = require('url');
+var util = require('util');
 var ws = require('ws');
 
+var EventEmitter = require('events').EventEmitter;
 var Promise = require('es6-promise').Promise;
 
 var argv = optimist
@@ -69,18 +71,31 @@ devToolsServer.on('connection', function(devToolsSocket) {
     port: port
   });
   targetSocket.on('connect', function() {
-    console.log('Connected!');
-
     // Create and stash connection.
-    var connection = new Relay(
+    var relay = new Relay(
         devToolsSocket, targetSocket, endpoint);
-    openRelays.push(connection);
+    openRelays.push(relay);
 
-    // Resume the socket so that messages come through.
-    devToolsSocket.resume();
+    relay.on('connect', function(targetInfo) {
+      console.log('Connected to \'' + this.endpoint_ + '\':');
+      console.log('  Host: ' + targetInfo.host);
+      console.log('    V8: ' + targetInfo.v8);
+      console.log('');
+
+      // Resume the socket so that messages come through.
+      devToolsSocket.resume();
+    });
+    relay.on('error', function(err) {
+      console.error('Relay error:', err);
+    });
+    relay.on('close', function() {
+      console.log('Relay to ' + endpoint + ' closed.');
+      console.log('');
+    });
   });
-  targetSocket.on('error', function(e) {
-    console.error('Unable to connect to target at ' + endpoint, e);
+  targetSocket.on('error', function(err) {
+    console.error('Unable to connect to target at ' + endpoint, err);
+    console.log('');
     devToolsSocket.close();
   });
 });
@@ -128,6 +143,18 @@ var Relay = function(devToolsSocket, targetSocket, endpoint) {
   this.closed_ = false;
 
   /**
+   * Target V8 information.
+   * This is populated on connect and the values will be undefined until then.
+   * @type {!Relay.TargetInfo}
+   * @private
+   */
+  this.targetInfo_ = {
+    host: 'unknown',
+    isNode: false,
+    v8: '0'
+  };
+
+  /**
    * Next sequence ID to use for the target command channel.
    * @type {number}
    * @private
@@ -172,8 +199,9 @@ var Relay = function(devToolsSocket, targetSocket, endpoint) {
   this.devTools_.on('message', (function(data, flags) {
     this.processDevToolsMessage_(data);
   }).bind(this));
-  this.devTools_.on('error', (function(e) {
-    console.log('DevTools::error', e);
+  this.devTools_.on('error', (function(err) {
+    console.log('DevTools::error', err);
+    this.emit('error', err);
   }).bind(this));
   this.devTools_.on('close', (function() {
     this.close();
@@ -185,14 +213,25 @@ var Relay = function(devToolsSocket, targetSocket, endpoint) {
   this.target_.on('data', (function(data, flags) {
     this.processTargetMessage_(data);
   }).bind(this));
-  this.target_.on('error', (function(e) {
-    console.log('Target::error', e);
+  this.target_.on('error', (function(err) {
+    console.log('Target::error', err);
+    this.emit('error', err);
     this.close();
   }).bind(this));
   this.target_.on('close', (function() {
     this.close();
   }).bind(this));
 };
+util.inherits(Relay, EventEmitter);
+
+/**
+ * @typedef {
+ *   host: string,
+ *   isNode: boolean,
+ *   v8: string
+ * }
+ */
+Relay.TargetInfo;
 
 /**
  * Processes an incoming DevTools message.
@@ -319,10 +358,16 @@ Relay.prototype.processTargetMessage_ = function(data) {
  * @param {string?} content Content string, if any.
  * @private
  */
-Relay.prototype.dispatchTargetMessage_ = function(
-    headers, content) {
+Relay.prototype.dispatchTargetMessage_ = function(headers, content) {
   if (!content) {
-    // ?
+    if (headers['Type'] == 'connect') {
+      this.targetInfo_ = {
+        host: headers['Embedding-Host'],
+        isNode: headers['Embedding-Host'].indexOf('node') == 0,
+        v8: headers['V8-Version']
+      };
+      this.emit('connect', this.targetInfo_);
+    }
     return;
   }
 
@@ -413,7 +458,7 @@ Relay.prototype.close = function() {
   // Remove from open connection list.
   openRelays.splice(openRelays.indexOf(this), 1);
 
-  console.log('Relay closing');
+  this.emit('close');
 };
 
 /**
