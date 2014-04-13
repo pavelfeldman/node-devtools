@@ -492,6 +492,37 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
     }, reject);
   }).bind(this);
 
+  lookup['Debugger.evaluateOnCallFrame'] = (function(params, resolve, reject) {
+    // First evaluate the expression as is.
+    this.debugTarget_.sendCommand('evaluate', {
+      'frame': params['callFrameId'],
+      'expression': params['expression']
+    }).then(function(response) {
+      // Then wrap the value using injected script, drop v8 handle.
+      var handle = response['handle'];
+      var og = params['objectGroup'] || "";
+      var rbv = params['returnByValue'] || false;
+      var gp = params['generatePreview'] || false;
+      var expression = '__is._wrapObject(o, "' + og + '", ' + rbv + ', ' +
+          gp + ')';
+
+      // Store result in property in order to avoid trimming.
+      var wrapped = 'var result = {};' +
+          'result[JSON.stringify(' + expression + ')] = 1;' +
+          'result;';
+      this.debugTarget_.sendCommand('evaluate', {
+        'expression': wrapped,
+        'additional_context': [ { 'name': 'o', 'handle': handle } ]
+      }).then(function(response) {
+        resolve({ result: JSON.parse(response['properties'][0]['name']) })
+      }.bind(this), reject);
+    }.bind(this), function(error) {
+      // Rejected evaluation -> throw message.
+      resolve({ 'wasThrows': true,
+                'result': { 'type': 'string', 'value' : error}});
+    });
+  }).bind(this);
+
   //----------------------------------------------------------------------------
   // DOMStorage.*
   //----------------------------------------------------------------------------
@@ -663,13 +694,14 @@ Relay.prototype.buildTargetDispatch_ = function() {
       var frames = [];
 
       for (var i = 0; i < v8frames.length; ++i) {
+        var v8frame = v8frames[i];
         var location = {};
-        location['scriptId'] = String(v8frames[i]['func']['scriptId']);
-        location['lineNumber'] = v8frames[i]['line'];
-        location['columnNumber'] = v8frames[i]['column'];
+        location['scriptId'] = String(v8frame['func']['scriptId']);
+        location['lineNumber'] = v8frame['line'];
+        location['columnNumber'] = v8frame['column'];
 
         var frame = {};
-        frame['callFrameId'] = String(i);
+        frame['callFrameId'] = String(v8frame['index']);
         frame['functionName'] = '';
         frame['location'] = location;
         frame['scopeChain'] = [];

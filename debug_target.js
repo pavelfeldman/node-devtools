@@ -187,7 +187,7 @@ DebugTarget.prototype.dispatchTargetMessage_ = function(headers, content) {
       if (packet['success']) {
         promisePair.resolve(packet['body']);
       } else {
-        promisePair.reject(Error(packet['message'] || 'Unknown error'));
+        promisePair.reject(packet['message']);
       }
       break;
     case 'event':
