@@ -31,6 +31,9 @@ var devToolsServer = new ws.Server({
   port: argv['port']
 });
 devToolsServer.on('connection', function(devToolsSocket) {
+  // Pause the socket so that we don't lose any messages.
+  devToolsSocket.pause();
+
   // url should be something like /localhost:5222
   var parsedUrl = url.parse(devToolsSocket.upgradeReq.url);
   var endpoint = parsedUrl.path.substring(1);
@@ -102,6 +105,25 @@ var DevToolsConnection = function(devToolsSocket, targetSocket, endpoint) {
    */
   this.targetBuffer_ = '';
 
+  /**
+   * Dispatch table that matches methods from the DevTools.
+   * For example, 'Debugger.enable' -> fn that handles the message.
+   * Each function receives the params, if present, and the resolve/reject
+   * functions for a promise that responds to the message.
+   * @type {!Object.<function(Object, Function, Function)>}
+   * @private
+   */
+  this.devToolsDispatch_ = this.buildDevToolsDispatch_();
+
+  /**
+   * Dispatch table that matches events from the target.
+   * For example, 'break' -> fn that handles the message.
+   * Each function receives the body of the event, if present.
+   * @type {!Object.<function(Object)>}
+   * @private
+   */
+  this.targetDispatch_ = this.buildTargetDispatch_();
+
   // DevTools socket.
   this.devTools_.on('message', (function(data, flags) {
     this.processDevToolsMessage_(data);
@@ -127,11 +149,8 @@ var DevToolsConnection = function(devToolsSocket, targetSocket, endpoint) {
     this.close();
   }).bind(this));
 
-  this.sendTargetCommand_('version', undefined).then(function(response) {
-    console.log('response', response);
-  }, function(err) {
-    console.log('error', err);
-  });
+  // Resume the devtools socket so that we get messages.
+  this.devTools_.resume();
 };
 
 /**
@@ -140,7 +159,42 @@ var DevToolsConnection = function(devToolsSocket, targetSocket, endpoint) {
  * @private
  */
 DevToolsConnection.prototype.processDevToolsMessage_ = function(data) {
-  console.log(data);
+  console.log('[DT]', data);
+
+  var packet = JSON.parse(data);
+  var method = packet['method'];
+  if (method) {
+    var reqId = packet['id'];
+    var dispatchMethod = this.devToolsDispatch_[method];
+    if (!dispatchMethod) {
+      console.error('Unhandled DevTools message: ' + method);
+      // TODO(pfeldman): proper error response?
+      this.devTools_.send(JSON.stringify({
+        'id': reqId,
+        'error': 'Unknown?'
+      }));
+      return;
+    }
+    var params = packet['params'];
+    var promise = new Promise(function(resolve, reject) {
+      dispatchMethod(params, resolve, reject);
+    });
+    promise.then((function(response) {
+      this.devTools_.send(JSON.stringify({
+        'id': reqId,
+        'result': response
+      }));
+    }).bind(this), (function(err) {
+      // TODO(pfeldman): proper error response?
+      this.devTools_.send(JSON.stringify({
+        'id': reqId,
+        'error': err.toString()
+      }));
+    }).bind(this));
+  } else {
+    // TODO(pfeldman): anything that isn't a method?
+    console.error('Unknown DevTools message: ' + packet);
+  }
 };
 
 /**
@@ -211,6 +265,8 @@ DevToolsConnection.prototype.dispatchTargetMessage_ = function(
     return;
   }
 
+  console.log('[V8]', content);
+
   var packet = JSON.parse(content);
   switch (packet['type']) {
     case 'response':
@@ -221,7 +277,14 @@ DevToolsConnection.prototype.dispatchTargetMessage_ = function(
         promisePair.reject(Error(packet['message'] || 'Unknown error'));
       }
       break;
-    // event
+    case 'event':
+      var dispatchMethod = this.targetDispatch_[packet['event']];
+      if (!dispatchMethod) {
+        console.error('Unknown target event: ' + packet['event']);
+        return;
+      }
+      dispatchMethod(packet['body']);
+      break;
     default:
       console.error('Unknown target packet type: ' + packet['type']);
       break;
@@ -235,8 +298,7 @@ DevToolsConnection.prototype.dispatchTargetMessage_ = function(
  * @return Promise satisfied when a response is received.
  * @private
  */
-DevToolsConnection.prototype.sendTargetCommand_ = function(
-    command, args, opt_callback) {
+DevToolsConnection.prototype.sendTargetCommand_ = function(command, args) {
   // Construct packet object.
   var packet = {
     'seq': ++this.nextTargetSeqId_,
@@ -285,4 +347,182 @@ DevToolsConnection.prototype.close = function() {
   openDevToolsConnections.splice(openDevToolsConnections.indexOf(this), 1);
 
   console.log('DevToolsConnection closing');
+};
+
+/**
+ * Builds the dispatch table that maps incoming DevTools commands to actions.
+ * @return {!Object.<function(Object, Function, Function)>} Lookup table.
+ * @private
+ */
+DevToolsConnection.prototype.buildDevToolsDispatch_ = function() {
+  var lookup = {};
+
+  // TODO(benvanik): send messages to target:
+  // this.sendTargetCommand_('command', {args}).then(function(response) {
+  //   resolve({...});
+  // }, reject);
+
+  //----------------------------------------------------------------------------
+  // Console.*
+  //----------------------------------------------------------------------------
+
+  lookup['Console.enable'] = (function(params, resolve, reject) {
+    resolve({});
+  }).bind(this);
+  lookup['Console.disable'] = (function(params, resolve, reject) {
+    resolve({});
+  }).bind(this);
+  lookup['Console.clearMessages'] = (function(params, resolve, reject) {
+    resolve({});
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // CSS.*
+  //----------------------------------------------------------------------------
+
+  lookup['CSS.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Database.*
+  //----------------------------------------------------------------------------
+
+  lookup['Database.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Debugger.*
+  //----------------------------------------------------------------------------
+
+  lookup['Debugger.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Debugger.setAsyncCallStackDepth'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Debugger.setPauseOnExceptions'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // DOMStorage.*
+  //----------------------------------------------------------------------------
+
+  lookup['DOMStorage.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // HeapProfiler.*
+  //----------------------------------------------------------------------------
+
+  lookup['HeapProfiler.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Inspector.*
+  //----------------------------------------------------------------------------
+
+  lookup['Inspector.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Network.*
+  //----------------------------------------------------------------------------
+
+  lookup['Network.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Network.setCacheDisabled'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Page.*
+  //----------------------------------------------------------------------------
+
+  lookup['Page.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Page.canScreencast'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Page.getResourceTree'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Page.setShowViewportSizeOnResize'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Profiler.*
+  //----------------------------------------------------------------------------
+
+  lookup['Profiler.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Runtime.*
+  //----------------------------------------------------------------------------
+
+  lookup['Runtime.evaluate'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  lookup['Runtime.releaseObjectGroup'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Timeline.*
+  //----------------------------------------------------------------------------
+
+  lookup['Timeline.enable'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  //----------------------------------------------------------------------------
+  // Worker.*
+  //----------------------------------------------------------------------------
+
+  lookup['Worker.canInspectWorkers'] = (function(params, resolve, reject) {
+    resolve({ 'result': false });
+  }).bind(this);
+
+  return lookup;
+};
+
+/**
+ * Builds the dispatch table that maps incoming target events to actions.
+ * @return {!Object.<function(Object)>} Lookup table.
+ * @private
+ */
+DevToolsConnection.prototype.buildTargetDispatch_ = function() {
+  var lookup = {};
+
+  // TODO(benvanik): send messages to the DevTools:
+  //     this.devTools_.send(JSON.stringify({contents}));
+
+  lookup['break'] = (function(body) {
+    // TODO(benvanik): plumb up
+    console.log('TODO: incoming target break event');
+  }).bind(this);
+
+  lookup['exception'] = (function(body) {
+    // TODO(benvanik): plumb up
+    console.log('TODO: incoming target exception event');
+  }).bind(this);
+
+  return lookup;
 };
