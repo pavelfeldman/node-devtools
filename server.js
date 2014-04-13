@@ -420,12 +420,14 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
       'data': {}
     });
   }).bind(this);
+
   lookup['Debugger.resume'] = (function(params, resolve, reject) {
     this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue').then(function(response) {
       resolve();
     }, reject);
   }).bind(this);
+
   lookup['Debugger.stepInto'] = (function(params, resolve, reject) {
     this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue', {
@@ -433,6 +435,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
+
   lookup['Debugger.stepOut'] = (function(params, resolve, reject) {
     this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue', {
@@ -440,12 +443,17 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
+
   lookup['Debugger.stepOver'] = (function(params, resolve, reject) {
     this.fireDevToolsEvent_('Debugger.resumed', {});
     this.debugTarget_.sendCommand('continue', {
       'stepaction': 'next',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
+  }).bind(this);
+
+  lookup['Debugger.getFunctionDetails'] = (function(params, resolve, reject) {
+    resolve();
   }).bind(this);
 
   /**
@@ -572,7 +580,11 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   }).bind(this);
 
   lookup['Page.getResourceTree'] = (function(params, resolve, reject) {
-    resolve({ 'result': false });
+    resolve({ 'frameTree': {
+        'frame': { 'id': '0', 'url': '' },
+        'childFrames': [],
+        'resources': [] }
+    });
   }).bind(this);
 
   lookup['Page.setShowViewportSizeOnResize'] = (function(params, resolve, reject) {
@@ -613,6 +625,10 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
       resolve(JSON.parse(response['properties'][0]['name']))
     }, reject);
   }
+
+  lookup['Runtime.enable'] = (function(params, resolve, reject) {
+    resolve();
+  }).bind(this);
 
   lookup['Runtime.evaluate'] = (function(params, resolve, reject) {
     dispatchOnInjectedScript.call(this,
@@ -672,7 +688,11 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   //----------------------------------------------------------------------------
 
   lookup['Worker.canInspectWorkers'] = (function(params, resolve, reject) {
-    resolve({ 'result': false });
+    resolve({ 'result': true });
+  }).bind(this);
+
+  lookup['Worker.enable'] = (function(params, resolve, reject) {
+    resolve();
   }).bind(this);
 
   return lookup;
