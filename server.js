@@ -72,11 +72,11 @@ devToolsServer.on('connection', function(devToolsSocket) {
   });
   targetSocket.on('connect', function() {
     // Create and stash connection.
-    var relay = new Relay(
-        devToolsSocket, targetSocket, endpoint);
+    var debugTarget = new DebugTarget(targetSocket, endpoint);
+    var relay = new Relay(devToolsSocket, debugTarget);
     openRelays.push(relay);
 
-    relay.on('connect', function(targetInfo) {
+    debugTarget.on('connect', function(targetInfo) {
       console.log('Connected to \'' + this.endpoint_ + '\':');
       console.log('  Host: ' + targetInfo.host);
       console.log('    V8: ' + targetInfo.v8);
@@ -107,26 +107,18 @@ devToolsServer.on('connection', function(devToolsSocket) {
 var openRelays = [];
 
 /**
- * A relay between a DevTools session and a target debug agent.
- * @param {!ws.WebSocket} devToolsSocket DevTools web socket.
+ * A facade around the target debug agent.
  * @param {!net.Socket} targetSocket Target TCP socket.
  * @param {string} endpoint Target endpoint like 'localhost:5858'.
  * @constructor
  */
-var Relay = function(devToolsSocket, targetSocket, endpoint) {
-  /**
-   * WebSocket connection to the DevTools instance.
-   * @type {!ws.WebSocket}
-   * @private
-   */
-  this.devTools_ = devToolsSocket;
-
+var DebugTarget = function(targetSocket, endpoint) {
   /**
    * TCP socket connection to the target debugger instance.
    * @type {!net.Socket}
    * @private
    */
-  this.target_ = targetSocket;
+  this.targetSocket_ = targetSocket;
 
   /**
    * Target endpoint address (like 'localhost:5858').
@@ -145,7 +137,7 @@ var Relay = function(devToolsSocket, targetSocket, endpoint) {
   /**
    * Target V8 information.
    * This is populated on connect and the values will be undefined until then.
-   * @type {!Relay.TargetInfo}
+   * @type {!DebugTarget.TargetInfo}
    * @private
    */
   this.targetInfo_ = {
@@ -175,6 +167,212 @@ var Relay = function(devToolsSocket, targetSocket, endpoint) {
    * @private
    */
   this.targetBuffer_ = '';
+
+  // Target socket.
+  this.targetSocket_.setEncoding('utf8');
+  this.targetSocket_.setKeepAlive(true);
+  this.targetSocket_.on('data', (function(data, flags) {
+    this.processTargetMessage_(data);
+  }).bind(this));
+  this.targetSocket_.on('error', (function(err) {
+    this.emit('error', err);
+    this.close();
+  }).bind(this));
+  this.targetSocket_.on('close', (function() {
+    this.close();
+  }).bind(this));
+};
+util.inherits(DebugTarget, EventEmitter);
+
+/**
+ * @typedef {
+ *   host: string,
+ *   isNode: boolean,
+ *   v8: string
+ * }
+ */
+DebugTarget.TargetInfo;
+
+/**
+ * Processes an incoming target message.
+ * @param {string} data Incoming data.
+ * @private
+ */
+DebugTarget.prototype.processTargetMessage_ = function(data) {
+  this.targetBuffer_ += data;
+
+  // Run a pass over the buffer. If we can parse a complete message, dispatch
+  // it.
+  while (this.targetBuffer_.length) {
+    if (!attemptProcessing.call(this)) {
+      break;
+    }
+  }
+
+  function attemptProcessing() {
+    // Read headers.
+    var headers = {};
+    var offset = 0;
+    while (offset < this.targetBuffer_.length) {
+      var linefeed = this.targetBuffer_.indexOf('\n', offset);
+      if (linefeed == -1) {
+        return false;
+      }
+      var line = this.targetBuffer_.substring(offset, linefeed).trim();
+      offset = linefeed + 1;
+      if (line.length) {
+        var parts = line.split(':');
+        var key = parts[0].trim();
+        var value = parts[1].trim();
+        headers[key] = value;
+      } else {
+        // Empty line. Check for content.
+        var contentLength = Number(headers['Content-Length']) || 0;
+        if (!contentLength) {
+          // No content, done.
+          this.dispatchTargetMessage_(headers, null);
+          this.targetBuffer_ = this.targetBuffer_.substring(offset);
+          return true;
+        } else {
+          if (this.targetBuffer_.length - offset >= contentLength) {
+            // Content present.
+            this.dispatchTargetMessage_(
+                headers, this.targetBuffer_.substr(offset, contentLength));
+            this.targetBuffer_ = this.targetBuffer_.substring(offset);
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+};
+
+/**
+ * Processes an incoming target message.
+ * @param {!Object.<string, string>} headers HTTP-ish headers.
+ * @param {string?} content Content string, if any.
+ * @private
+ */
+DebugTarget.prototype.dispatchTargetMessage_ = function(headers, content) {
+  if (!content) {
+    if (headers['Type'] == 'connect') {
+      this.targetInfo_ = {
+        host: headers['Embedding-Host'],
+        isNode: headers['Embedding-Host'].indexOf('node') == 0,
+        v8: headers['V8-Version']
+      };
+      this.emit('connect', this.targetInfo_);
+    }
+    return;
+  }
+
+  if (argv['log-network']) {
+    console.log('[V8->]', content);
+  }
+
+  var packet = JSON.parse(content);
+  switch (packet['type']) {
+    case 'response':
+      var promisePair = this.pendingTargetPromises_[packet['request_seq']];
+      if (packet['success']) {
+        promisePair.resolve(packet['body']);
+      } else {
+        promisePair.reject(Error(packet['message'] || 'Unknown error'));
+      }
+      break;
+    case 'event':
+      this.emit('event', packet['event'], packet['body'] || {});
+      break;
+    default:
+      console.error('Unknown target packet type: ' + packet['type']);
+      break;
+  }
+};
+
+/**
+ * Sends a command to the target.
+ * @param {string} command Command name, like 'continue'.
+ * @param {Object} args Command arguments object, if any.
+ * @return Promise satisfied when a response is received.
+ * @private
+ */
+DebugTarget.prototype.sendCommand = function(command, args) {
+  // Construct packet object.
+  var packet = {
+    'seq': ++this.nextTargetSeqId_,
+    'type': 'request',
+    'command': command
+  };
+  if (args) {
+    packet['arguments'] = args;
+  }
+
+  // Stash promise.
+  var promise = new Promise((function(resolve, reject) {
+    this.pendingTargetPromises_[packet['seq']] = {
+      resolve: resolve,
+      reject: reject
+    };
+  }).bind(this));
+
+  // Send the data.
+  var packetString = JSON.stringify(packet);
+  var packetLength = packetString.length;
+  this.targetSocket_.write(
+      'Content-Length: ' + packetLength + '\r\n\r\n' +
+      packetString);
+
+  if (argv['log-network']) {
+    console.log('[->V8]', packetString);
+  }
+
+  return promise;
+};
+
+/**
+ * Closes the connection to the DevTools and target.
+ */
+DebugTarget.prototype.close = function() {
+  if (this.closed_) {
+    return;
+  }
+  this.closed_ = true;
+
+  // Close target connection.
+  // This will allow the target to resume running.
+  this.targetSocket_.destroy();
+
+  this.emit('close');
+};
+
+/**
+ * A relay between a DevTools session and a target debug agent.
+ * @param {!ws.WebSocket} devToolsSocket DevTools web socket.
+ * @param {!DebugTarget} debugTarget
+ * @constructor
+ */
+var Relay = function(devToolsSocket, debugTarget) {
+  /**
+   * WebSocket connection to the DevTools instance.
+   * @type {!ws.WebSocket}
+   * @private
+   */
+  this.devTools_ = devToolsSocket;
+
+  /**
+   * Debug target instance.
+   * @type {!DebugTarget}
+   * @private
+   */
+  this.debugTarget_ = debugTarget;
+
+  /**
+   * Whether the connection has been closed.
+   * @type {boolean}
+   * @private
+   */
+  this.closed_ = false;
 
   /**
    * Dispatch table that matches methods from the DevTools.
@@ -207,31 +405,24 @@ var Relay = function(devToolsSocket, targetSocket, endpoint) {
     this.close();
   }).bind(this));
 
-  // Target socket.
-  this.target_.setEncoding('utf8');
-  this.target_.setKeepAlive(true);
-  this.target_.on('data', (function(data, flags) {
-    this.processTargetMessage_(data);
-  }).bind(this));
-  this.target_.on('error', (function(err) {
+  this.debugTarget_.on('error', (function(err) {
     console.log('Target::error', err);
     this.emit('error', err);
     this.close();
   }).bind(this));
-  this.target_.on('close', (function() {
+  this.debugTarget_.on('close', (function() {
     this.close();
+  }).bind(this));
+  this.debugTarget_.on('event', (function(event, body) {
+    var dispatchMethod = this.targetDispatch_[event];
+    if (!dispatchMethod) {
+      console.error('Unknown target event: ' + event);
+      return;
+    }
+    dispatchMethod(body);
   }).bind(this));
 };
 util.inherits(Relay, EventEmitter);
-
-/**
- * @typedef {
- *   host: string,
- *   isNode: boolean,
- *   v8: string
- * }
- */
-Relay.TargetInfo;
 
 /**
  * Processes an incoming DevTools message.
@@ -310,148 +501,6 @@ Relay.prototype.sendDevToolsCommand_ = function(method, params) {
 };
 
 /**
- * Processes an incoming target message.
- * @param {string} data Incoming data.
- * @private
- */
-Relay.prototype.processTargetMessage_ = function(data) {
-  this.targetBuffer_ += data;
-
-  // Run a pass over the buffer. If we can parse a complete message, dispatch
-  // it.
-  while (this.targetBuffer_.length) {
-    if (!attemptProcessing.call(this)) {
-      break;
-    }
-  }
-
-  function attemptProcessing() {
-    // Read headers.
-    var headers = {};
-    var offset = 0;
-    while (offset < this.targetBuffer_.length) {
-      var linefeed = this.targetBuffer_.indexOf('\n', offset);
-      if (linefeed == -1) {
-        return false;
-      }
-      var line = this.targetBuffer_.substring(offset, linefeed).trim();
-      offset = linefeed + 1;
-      if (line.length) {
-        var parts = line.split(':');
-        var key = parts[0].trim();
-        var value = parts[1].trim();
-        headers[key] = value;
-      } else {
-        // Empty line. Check for content.
-        var contentLength = Number(headers['Content-Length']) || 0;
-        if (!contentLength) {
-          // No content, done.
-          this.dispatchTargetMessage_(headers, null);
-          this.targetBuffer_ = this.targetBuffer_.substring(offset);
-          return true;
-        } else {
-          if (this.targetBuffer_.length - offset >= contentLength) {
-            // Content present.
-            this.dispatchTargetMessage_(
-                headers, this.targetBuffer_.substr(offset, contentLength));
-            this.targetBuffer_ = this.targetBuffer_.substring(offset);
-            return true;
-          }
-        }
-      }
-    }
-    return false;
-  };
-};
-
-/**
- * Processes an incoming target message.
- * @param {!Object.<string, string>} headers HTTP-ish headers.
- * @param {string?} content Content string, if any.
- * @private
- */
-Relay.prototype.dispatchTargetMessage_ = function(headers, content) {
-  if (!content) {
-    if (headers['Type'] == 'connect') {
-      this.targetInfo_ = {
-        host: headers['Embedding-Host'],
-        isNode: headers['Embedding-Host'].indexOf('node') == 0,
-        v8: headers['V8-Version']
-      };
-      this.emit('connect', this.targetInfo_);
-    }
-    return;
-  }
-
-  if (argv['log-network']) {
-    console.log('[V8->]', content);
-  }
-
-  var packet = JSON.parse(content);
-  switch (packet['type']) {
-    case 'response':
-      var promisePair = this.pendingTargetPromises_[packet['request_seq']];
-      if (packet['success']) {
-        promisePair.resolve(packet['body']);
-      } else {
-        promisePair.reject(Error(packet['message'] || 'Unknown error'));
-      }
-      break;
-    case 'event':
-      var dispatchMethod = this.targetDispatch_[packet['event']];
-      if (!dispatchMethod) {
-        console.error('Unknown target event: ' + packet['event']);
-        return;
-      }
-      dispatchMethod(packet['body'] || {});
-      break;
-    default:
-      console.error('Unknown target packet type: ' + packet['type']);
-      break;
-  }
-};
-
-/**
- * Sends a command to the target.
- * @param {string} command Command name, like 'continue'.
- * @param {Object} args Command arguments object, if any.
- * @return Promise satisfied when a response is received.
- * @private
- */
-Relay.prototype.sendTargetCommand_ = function(command, args) {
-  // Construct packet object.
-  var packet = {
-    'seq': ++this.nextTargetSeqId_,
-    'type': 'request',
-    'command': command
-  };
-  if (args) {
-    packet['arguments'] = args;
-  }
-
-  // Stash promise.
-  var promise = new Promise((function(resolve, reject) {
-    this.pendingTargetPromises_[packet['seq']] = {
-      resolve: resolve,
-      reject: reject
-    };
-  }).bind(this));
-
-  // Send the data.
-  var packetString = JSON.stringify(packet);
-  var packetLength = packetString.length;
-  this.target_.write(
-      'Content-Length: ' + packetLength + '\r\n\r\n' +
-      packetString);
-
-  if (argv['log-network']) {
-    console.log('[->V8]', packetString);
-  }
-
-  return promise;
-};
-
-/**
  * Closes the connection to the DevTools and target.
  */
 Relay.prototype.close = function() {
@@ -460,9 +509,9 @@ Relay.prototype.close = function() {
   }
   this.closed_ = true;
 
-  // Close target connection.
+  // Close target.
   // This will allow the target to resume running.
-  this.target_.destroy();
+  this.debugTarget_.close();
 
   // Close DevTools connection.
   this.devTools_.close();
@@ -509,7 +558,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   }).bind(this);
 
   //----------------------------------------------------------------------------
-  // Debugger.*
+  // DebugTarget.*
   //----------------------------------------------------------------------------
 
   lookup['Debugger.enable'] = (function(params, resolve, reject) {
@@ -517,7 +566,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   }).bind(this);
   lookup['Debugger.setOverlayMessage'] = (function(params, resolve, reject) {
     if (params['message']) {
-      console.log('Debugger: ' + params['message']);
+      console.log('DebugTarget: ' + params['message']);
     }
     resolve();
   }).bind(this);
@@ -546,7 +595,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
         reject(Error('Unknown setPauseOnExceptions state: ' + params['state']));
         return;
     }
-    this.sendTargetCommand_('setexceptionbreak', {
+    this.debugTarget_.sendCommand('setexceptionbreak', {
       'type': type,
       'enabled': enabled
     }).then(function(response) { resolve(); }, reject);
@@ -560,7 +609,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
     // We'll need to resolve() right away and poke the DevTools to let them know
     // the (probably) succeeded.
     // TODO(pfeldman): I'm sure there's some InjectedScript thing for this.
-    this.sendTargetCommand_('evaluate', {
+    this.debugTarget_.sendCommand('evaluate', {
       'expression': 'debugger',
       'global': true
     });
@@ -572,22 +621,22 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
     });
   }).bind(this);
   lookup['Debugger.resume'] = (function(params, resolve, reject) {
-    this.sendTargetCommand_('continue').then(function(response) { resolve(); }, reject);
+    this.debugTarget_.sendCommand('continue').then(function(response) { resolve(); }, reject);
   }).bind(this);
   lookup['Debugger.stepInto'] = (function(params, resolve, reject) {
-    this.sendTargetCommand_('continue', {
+    this.debugTarget_.sendCommand('continue', {
       'stepaction': 'in',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
   lookup['Debugger.stepOut'] = (function(params, resolve, reject) {
-    this.sendTargetCommand_('continue', {
+    this.debugTarget_.sendCommand('continue', {
       'stepaction': 'out',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
   }).bind(this);
   lookup['Debugger.stepOver'] = (function(params, resolve, reject) {
-    this.sendTargetCommand_('continue', {
+    this.debugTarget_.sendCommand('continue', {
       'stepaction': 'next',
       'stepcount': 1
     }).then(function(response) { resolve(); }, reject);
