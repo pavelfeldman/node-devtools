@@ -240,7 +240,7 @@ Relay.prototype.processDevToolsMessage_ = function(data) {
       // TODO(pfeldman): proper error response?
       var responseData = JSON.stringify({
         'id': reqId,
-        'error': err.toString()
+        'error': { 'message': err.toString(), 'code': -32001 }
       });
       this.devTools_.send(responseData);
       if (argv['log-network']) {
@@ -453,7 +453,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   }).bind(this);
 
   lookup['Debugger.getFunctionDetails'] = (function(params, resolve, reject) {
-    resolve();
+    reject('Unsupported');
   }).bind(this);
 
   /**
@@ -480,7 +480,7 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
         var actualLocation = response['actual_locations'][i];
         locations.push({ 'lineNumber': actualLocation['line'],
                          'columnNumber': actualLocation['column'],
-                         'scriptId': actualLocation['script_id'] });
+                         'scriptId': String(actualLocation['script_id']) });
       }
       resolve({ 'breakpointId' : breakpointId, 'locations': locations });
     }, reject);
@@ -627,6 +627,15 @@ Relay.prototype.buildDevToolsDispatch_ = function() {
   }
 
   lookup['Runtime.enable'] = (function(params, resolve, reject) {
+    this.fireDevToolsEvent_('Runtime.executionContextCreated', {
+      'context': {
+        'id': 0,
+        'isPageContext': true,
+        'origin': 'default',
+        'name': 'default',
+        'frameId': 'frameId'
+      }
+    });
     resolve();
   }).bind(this);
 
@@ -715,6 +724,7 @@ Relay.prototype.buildTargetDispatch_ = function() {
 
       for (var i = 0; i < v8frames.length; ++i) {
         var v8frame = v8frames[i];
+        console.error(JSON.stringify(v8frame));
         var location = {};
         location['scriptId'] = String(v8frame['func']['scriptId']);
         location['lineNumber'] = v8frame['line'];
@@ -722,7 +732,7 @@ Relay.prototype.buildTargetDispatch_ = function() {
 
         var frame = {};
         frame['callFrameId'] = String(v8frame['index']);
-        frame['functionName'] = '';
+        frame['functionName'] = v8frame['func']['name'];
         frame['location'] = location;
         frame['scopeChain'] = [];
         frames.push(frame);
